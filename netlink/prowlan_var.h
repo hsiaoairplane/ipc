@@ -1,0 +1,14 @@
+
+#ifndef _PROWLAN_VAR_H_
+#define _PROWLAN_VAR_H_
+
+#define PROWLANMGRP_WIRELESS 1
+
+#define PROWLANM_WIRELESS_EVENT	1
+
+#define PROWLANM_ATTR_MASK  0xF000
+#define PROWLANM_ATTR_WIRELESS 0x8000
+#define PROWLANM_ATTR(cmd)	((cmd) & PROWLANM_ATTR_MASK)
+
+#endif
+
