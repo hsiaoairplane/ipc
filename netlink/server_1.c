@@ -3,6 +3,7 @@
 #include <string.h>
 #include <malloc.h>
 #include <errno.h>
+#include <unistd.h>
 #include <asm/types.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
@@ -48,6 +49,8 @@ int main(int argc, char *argv[])
 
 	iov.iov_base = (void *)nlh;
 	iov.iov_len = nlh->nlmsg_len;
+
+	memset(&msg, 0, sizeof(msg));
 	msg.msg_name = (void *)&(local);
 	msg.msg_namelen = sizeof(local);
 	msg.msg_iov = &iov;
@@ -59,7 +62,7 @@ int main(int argc, char *argv[])
 			printf("recvmsg error: %d\n", bytes);
 		}
 
-		printf("Server 1 => Received message payload: %s\n", NLMSG_DATA(msg.msg_iov->iov_base));
+		printf("Server 1 => Received message payload: %s\n", (char *) NLMSG_DATA(msg.msg_iov->iov_base));
     }
 
     return sock;
