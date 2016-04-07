@@ -1,7 +1,7 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <malloc.h>
 #include <asm/types.h>
 #include <sys/socket.h>
@@ -36,6 +36,7 @@ int initSocket(void)
 
 	memset(&local, 0, sizeof(local));
 	local.nl_family = AF_NETLINK;
+	local.nl_pid = getpid();
 	local.nl_groups = PROWLANMGRP_WIRELESS;
 	if (bind(sock, (struct sockaddr *) &local, sizeof(local)) < 0) {
 		perror("bind(netlink)");
@@ -87,13 +88,16 @@ int main(int argc, char *argv[])
 	struct prowlan_ifinfomsg *ifinfomsg;
 	struct nlattr *attr;
 
-	if ((sock = initSocket()) < 0)
+	if ((sock = initSocket()) < 0) {
  		return 0;
+	}
 
+#if 0
     if (daemon(1, 1) < 0) {
         printf("daemon failed\n");
         return -1;
     }
+#endif
 
 	fromlen = sizeof(from);
 	while (1) {
@@ -123,12 +127,11 @@ int main(int argc, char *argv[])
 
 						attr = (struct nlattr *) (((char *) NLMSG_DATA(h)) + nlmsg_len);
 
-						printf("in %s, type(%x), subtype(%x), nla_len (%x)",
-									__FUNCTION__, GET_TYPE(attr->nla_type), GET_SUBTYPE(attr->nla_type), attr->nla_len);
-
-						printf("nla_type %x\n", attr->nla_type);
+						printf("in %s, type(%x), subtype(%x), nla_len (%x), nla_type (%x)\n",
+									__FUNCTION__, GET_TYPE(attr->nla_type), GET_SUBTYPE(attr->nla_type), attr->nla_len, attr->nla_type);
 
 						while (NLA_OK(attr, attrlen)) {
+							printf("NLA_OK\n");
 							if (attr->nla_type == PROWLANM_ATTR_WIRELESS) {
 								eventRecv((((char*)attr) + NLA_ALIGN(sizeof(struct nlattr))),ifinfomsg->ifi_name);
 							}

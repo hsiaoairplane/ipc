@@ -3,147 +3,189 @@
 #include <stdlib.h>
 #include <string.h>
 #include <malloc.h>
+#include <unistd.h>
 #include <errno.h>
 #include <asm/types.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <net/ethernet.h>
-//#include <linux/netlink.h>
-#include <libnl3/netlink/msg.h>
+#include <linux/netlink.h>
 
 #include "prowlan_var.h"
 #include "prowlan_ipc.h"
 
-static int
-netlink_fill_wlaninfo(struct nl_msg *msg, int msg_type, int attr_type, char *data, int data_len)
-{
-	struct prowlan_ifinfomsg *ifi;
-	struct nlmsghdr *nlh;
+#define MAX_PAYLOAD 512
 
-	nlh = nlmsg_put(msg, 0, 0, msg_type, sizeof(struct prowlan_ifinfomsg), 0);
-	if (nlh == NULL)
-		return -EMSGSIZE;
-
-	ifi = nlmsg_data(nlh);
-#if 0
-	if (dev != NULL) {
-		memcpy(&ifi->ifi_name, dev->name, IFNAMSIZ);
-		ifi->ifi_type = dev->type;
-		ifi->ifi_index = dev->ifindex;
-	}
-#endif
-
-	/* Add the prowlan data in the netlink packet */
-	NLA_PUT(msg, attr_type, data_len, data);
-
-//	return nlmsg_end(nlh);
-	return 0;
-
-nla_put_failure:
-//	nlmsg_cancel(msg, nlh);
-	return -EMSGSIZE;
-}
-
-static struct nl_msg *
-msg_prowlan_event(unsigned int nlgroup, int cmd, char *event, int event_len)
-{
-	int err, attr_type, msg_type;
-	struct nl_msg *msg;
-
-	msg = nlmsg_alloc();
-	if (!msg)
-		return;
-
-	switch (PROWLANM_ATTR(cmd)) {
-	case PROWLANM_ATTR_WIRELESS:
-		msg_type = PROWLANM_WIRELESS_EVENT;
-		attr_type = PROWLANM_ATTR_WIRELESS;
-		break;
-	default:
-		printf("%s: can't get attribute type (%X) !!!\n", __func__, PROWLANM_ATTR(cmd));
-		break;
-	}
-
-#if 1
-	netlink_fill_wlaninfo(msg, msg_type, attr_type, event, event_len);
-#else
-	err = netlink_fill_wlaninfo(msg, msg_type, attr_type, event, event_len);
-	if (err < 0) {
-		printf("%s error\n", __FUNCTION__);
-		return;
-	}
-#endif
-
-	return msg;
-
-//	NETLINK_CB(msg).dst_group = nlgroup;
-//	skb_queue_tail(&prowlan_nlevent_queue, skb);
-//	tasklet_schedule(&prowlan_nlevent_tasklet);
-	return;
-}
+struct prowlan_nlattr_hdr {
+	u_int16_t nla_len;
+	u_int16_t nla_type;
+}__attribute__ ((packed));
 
 static int
-prowlan_send_event(unsigned int group, unsigned int cmd, struct prowlan_req_data *wlanreq, char *extra) /* obsolete extra ? */
+netlink_event_send(const char *ifname, int group, int cmd, struct prowlan_req_data *wlanreq, char *extra)
 {
-	struct prowlan_event *event;		/* Mallocated whole event */
-	int event_len;
+	int sock_fd;
+	struct sockaddr_nl from, to;
+	struct nlmsghdr *h;
+	struct iovec iov;
+	struct msghdr nlinkmsg;
+	struct prowlan_ifinfomsg *ifihdr;
+	struct prowlan_nlattr_hdr *hdr;
+	struct prowlan_event *event;
+	char *ptr;
+	size_t ifi_len, event_len, hdr_len;
 	int bytes;
 
-	/* Create temporary buffer to hold the event */
-	event_len = sizeof(struct prowlan_event) + wlanreq->hdr.ext_len;
-	event = malloc(event_len);
-	if (event == NULL)
-		return -1;
+	/* FROM */
+    sock_fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_USERSOCK);
+    memset(&from, 0, sizeof(from));
+    from.nl_family = AF_NETLINK;
+    from.nl_pid = getpid(); /* self pid */
+    from.nl_groups = PROWLANMGRP_WIRELESS;
+    bind(sock_fd, (struct sockaddr*) &from, sizeof(from));
 
-	memset(event, 0x00, event_len);
+	/* TO */
+	memset(&to, 0, sizeof(to));
+	to.nl_family = AF_NETLINK;
+	to.nl_pid = getpid();
+	to.nl_groups = PROWLANMGRP_WIRELESS; /* multicast */
+
+	/** Message format
+	 *  ----------------------------------------------
+	 *  | Netlink Header | ZyXEL Header | Attributes |
+	 *  ----------------------------------------------
+	 */
+
+	/** Netlink Header
+	 *      32       16     16        32      32
+ 	 *  -------------------------------------------
+	 *  | Length  | Type | Flags | Sequence | PID |
+	 *  -------------------------------------------
+	 */
+
+	h = (struct nlmsghdr *) malloc(NLMSG_SPACE(MAX_PAYLOAD));
+	if (NULL == h) {
+		printf("Error on malloc: %s(%d)\n", strerror(errno), errno);
+		return -1;	
+	}
+
+	/* Fill the netlink message header */
+	h->nlmsg_len = NLMSG_SPACE(MAX_PAYLOAD);
+	h->nlmsg_type = PROWLANM_WIRELESS_EVENT;
+	h->nlmsg_pid = getpid();  /* self pid */
+	h->nlmsg_flags = 0; /* not used */
+
+	iov.iov_base = (void *)h;
+	iov.iov_len = h->nlmsg_len;
+
+	memset(&nlinkmsg, 0 ,sizeof(nlinkmsg));
+	nlinkmsg.msg_name = (void *)&to;
+	nlinkmsg.msg_namelen = sizeof(to);
+	nlinkmsg.msg_iov = &iov;
+	nlinkmsg.msg_iovlen = 1;
+
+	/** ZyXEL Header
+     *      (15-16) * 8       16         32
+	 * ------------------------------------------
+     * | ifi_name[15-16] | ifi_type | ifi_index |
+     * ------------------------------------------
+	 */
+
+	/* 1. assign prowlan_ifinfomsg */
+	ifi_len = sizeof(struct prowlan_ifinfomsg);
+	ifihdr = (struct prowlan_ifinfomsg *) malloc(ifi_len);
+	if (NULL == ifihdr) {
+		printf("Error on malloc: %s(%d)\n", strerror(errno), errno);
+		return -1;
+	}
+
+	memset(ifihdr, 0, ifi_len);
+	strncpy(((struct prowlan_ifinfomsg *)ifihdr)->ifi_name, ifname, sizeof (((struct prowlan_ifinfomsg *)ifihdr)->ifi_name));
+	((struct prowlan_ifinfomsg *)ifihdr)->ifi_type = 0;
+	((struct prowlan_ifinfomsg *)ifihdr)->ifi_index = 0;
+
+	/** Attributes
+     *     32      sizeof(struct prowlan_event)
+	 * -----------------------------------------
+	 * | nlattr |             value            |
+	 * -----------------------------------------
+	 */
+
+	/** nlattr
+     *      16        16
+     * ----------------------
+     * | nla_len | nla_type |
+     * ----------------------
+     */
+	/* 2. assign attributes of nlattr */
+	hdr_len = sizeof(struct prowlan_nlattr_hdr);
+	hdr = (struct prowlan_nlattr_hdr *) malloc(hdr_len);
+	if (NULL == hdr) {
+		printf("Error on malloc: %s(%d)\n", strerror(errno), errno);
+		return -1;
+	}
+	
+	/* Fill header */
+	memset(hdr, 0, hdr_len);
+	hdr->nla_type = PROWLANM_ATTR_WIRELESS;
+
+	/** value
+     *  prowlan_event_hdr  prowlan_req_data
+     * ------------------------------------
+     * |        hdr      |      data      |
+     * ------------------------------------
+     */
+	/* 3. assign attribute of value */
+	event_len = sizeof(struct prowlan_event) + wlanreq->hdr.ext_len;
+	event = (struct prowlan_event *) malloc(event_len);
+	if (NULL == event) {
+		printf("Error on malloc: %s(%d)\n", strerror(errno), errno);
+		return -1;
+	}
+	
 	/* Fill event */
+	memset(event, 0, event_len);
 	event->hdr.len = event_len;
 	event->hdr.cmd = cmd;
-	memcpy((&event->data), (char *) wlanreq, wlanreq->hdr.len);
-	if (wlanreq->hdr.ext_len > 0)
-		memcpy((((char *)&(event->data)) + wlanreq->hdr.len), (char*) extra, wlanreq->hdr.ext_len);
-
-	printf("event_len = %d\n", event_len);
-
-#if 1
-	/* Send via the Prowlan Netlink event channel */
-	struct nl_msg *msg;
-	struct nl_sock *sock_fd;
-	int err;
-
-	msg = msg_prowlan_event(group, cmd, (char *) event, event->hdr.len);
-	if (NULL == msg) {
-		printf("msg NULL\n");
-		return -1;
+	memcpy(&event->data, wlanreq, wlanreq->hdr.len);
+	if (wlanreq->hdr.ext_len > 0) {
+		memcpy(&event->data + wlanreq->hdr.len, extra, wlanreq->hdr.ext_len);
 	}
+	
+	/* Adjust nla_len (nlattr header length + value length) */
+	hdr->nla_len = hdr_len + event_len;
+	
+	/* 4. attach ZyXEL Header and attributes */
+	ptr = NLMSG_DATA(h);
+	memcpy(ptr, ifihdr, ifi_len);
+	memcpy(ptr + ifi_len, hdr, hdr_len);
+	memcpy(ptr + ifi_len + hdr_len, event, event_len);
 
-	if (!(sock_fd = nl_socket_alloc())) {
-		printf("Unable to allocate netlink socket\n");
-		return -1;
-	}
-
-	if ((err = nl_connect(sock_fd, NETLINK_USERSOCK)) < 0) {
-		nl_perror(err, "Unable to connect socket");
-		nl_socket_free(sock_fd);
-		return err;
-	}
-
-	//bytes = nl_send(sock_fd, msg);
-	//bytes = nl_send_auto(sock_fd, msg);
-	bytes = nl_send_auto_complete(sock_fd, msg);
-
-	printf("bytes=%d\n", bytes);
-
+	/* 5. netlink sendmsg to user-space application */
+	bytes = sendmsg(sock_fd, &nlinkmsg, 0);
 	if (bytes < 0) {
-		nl_perror(bytes, "Failed to send message");
-		return bytes;
+		printf("error sendmsg %d\n", bytes);
+	} else {
+		printf("send message bytes = %d\n", bytes);
 	}
 
-	nl_close(sock_fd);
-	nl_socket_free(sock_fd);
-#endif
+	/* 6. free resources */
+	if (ifihdr) {
+		free(ifihdr);
+	}
+	if (h) {
+		free(h);
+	}
+	if (hdr) {
+		free(hdr);
+	}
+	if (event) {
+		free(event);
+	}
 
-	/* Cleanup */
-	free(event);
+	if (sock_fd) {
+		close(sock_fd);
+	}
 
 	return 0;
 }
@@ -157,7 +199,10 @@ int main(int argc, char *argv[])
 	ipc_req.hdr.ext_len = 0;
 	memcpy(ipc_req.u.sta.macaddr, macaddr, ETHER_ADDR_LEN);
 
-	prowlan_send_event(PROWLANMGRP_WIRELESS, PROWE_MSG|PROWE_MSG_ASSOC, &ipc_req, NULL);
+#if 1 // Demo
+	const char ifname[] = "wifi0";
+	netlink_event_send(ifname, PROWLANMGRP_WIRELESS, PROWE_MSG|PROWE_MSG_ASSOC, &ipc_req, NULL);
+#endif
 
 	return 0;
 }
