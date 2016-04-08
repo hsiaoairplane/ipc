@@ -103,8 +103,6 @@ int main(int argc, char *argv[])
 	while (1) {
 		left = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *) &from, &fromlen);
 
-		printf("left=%d\n", left);
-
 		if (left > 0) {
 			h = (struct nlmsghdr *) buf;
 			while (left >= (int) sizeof(*h)) {
@@ -131,7 +129,6 @@ int main(int argc, char *argv[])
 									__FUNCTION__, GET_TYPE(attr->nla_type), GET_SUBTYPE(attr->nla_type), attr->nla_len, attr->nla_type);
 
 						while (NLA_OK(attr, attrlen)) {
-							printf("NLA_OK\n");
 							if (attr->nla_type == PROWLANM_ATTR_WIRELESS) {
 								eventRecv((((char*)attr) + NLA_ALIGN(sizeof(struct nlattr))),ifinfomsg->ifi_name);
 							}
