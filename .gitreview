@@ -1,0 +1,4 @@
+[gerrit]
+host=gerrit.dc.zyxel.com.tw
+project=jenting/ZT01592-test.git
+defaultrebase=0
